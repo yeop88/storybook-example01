@@ -1,0 +1,14 @@
+[server]
+address = "0.0.0.0"
+port = 8502
+headless = true
+enableStaticServing = true
+fileWatcherType = "none"
+runOnSave = false
+maxUploadSize = 50
+# 브라우저 마이크는 HTTPS 에서만 동작 → 사내 CA 로 발급한 인증서 (python make_cert.py 로 생성)
+sslCertFile = "certs/cert.pem"
+sslKeyFile = "certs/key.pem"
+
+[browser]
+gatherUsageStats = false

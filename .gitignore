@@ -1,0 +1,9 @@
+.env
+models/
+certs/
+data/
+static/books/
+__pycache__/
+*.pyc
+*.tmp
+.venv/
