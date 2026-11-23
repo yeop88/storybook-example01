@@ -72,8 +72,3 @@ def to_speech(text: str) -> str:
     t = _NUM_RE.sub(_number, t)
     return re.sub(r"\s{2,}", " ", t).strip()
 
-
-if __name__ == "__main__":
-    for s in ["문어는 3살이었어요.", "사과 12개와 물고기 20마리", "1번째 친구, 2번째 친구", "2025년 3월 5일",
-              "100명이 모였어요", "오후 3시에 2시간 동안", "50% 할인", "3.5킬로미터", "1,000원"]:
-        print(s, "→", to_speech(s))

@@ -6,10 +6,9 @@ from statistics import mean, median
 import pandas as pd
 import streamlit as st
 
-import book
-import config
-import gpu
-import tts_client
+from storybook import config
+from storybook.application import scheduler, startup
+from storybook.infra import book_store
 
 
 def _nums(xs):
@@ -49,17 +48,17 @@ def _row(b: dict) -> dict:
 
 def render():
     st.subheader("📊 서비스 통계")
-    books = book.list_books()
+    books = book_store.list_books()
     rows = [_row(b) for b in books]
 
     # 지금 상태
-    qs = book.queue_status()
-    n_books, used = book.books_usage()
-    s = gpu.status()
+    qs = scheduler.status()
+    n_books, used = book_store.usage()
+    s = startup.status()
     c = st.columns(4)
     c[0].metric(f"지금 만드는 책 (대기 {len(qs['waiting'])}권)", f"{len(qs['making'])} / {qs['limit']}권")
     c[1].metric(f"저장된 책 ({used / 1e6:,.0f}MB)", f"{n_books}권")
-    c[2].metric("목소리(TTS)", "준비" if tts_client.health().get("ready") else "꺼짐")
+    c[2].metric("목소리(TTS)", "준비" if s["tts_ready"] else s["tts"].split(" (")[0])
     c[3].metric("그림", s["paint"].split(" (")[0])
 
     if not rows:
@@ -78,6 +77,6 @@ def render():
     c[4].metric("서버 전환 / 한자 수정", f"{int(df['서버 전환'].sum())} / {int(df['한자 수정'].sum())}회")
 
     st.markdown("##### 책별 기록")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
     st.caption("첫 소리 = 만들기를 누른 뒤 첫 음성이 만들어지기까지 (대기 포함). 대기 = 동시 제작 한도"
                f"({config.MAX_BOOKS_AT_ONCE}권) 때문에 차례를 기다린 시간. 예전 책에는 일부 값이 없을 수 있어요.")

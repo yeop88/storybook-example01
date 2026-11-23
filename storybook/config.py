@@ -1,12 +1,12 @@
-"""공통 설정 (.env 로드)."""
+"""공통 설정 (.env 로드). 다른 모듈보다 먼저 import 해야 함 (HF_HUB_OFFLINE 등이 모델 라이브러리보다 먼저 적용되도록)."""
 
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-APP_DIR = Path(__file__).resolve().parent
-load_dotenv(APP_DIR / ".env")  # 모델 라이브러리 임포트 전에 로드 (HF_HUB_OFFLINE 등)
+APP_DIR = Path(__file__).resolve().parents[1]  # story_app/ (이 파일은 story_app/storybook/config.py)
+load_dotenv(APP_DIR / ".env")
 
 
 def env(key: str, default: str = "") -> str:
@@ -29,12 +29,20 @@ for _d in (DATA_DIR, BOOKS_DIR):
 
 SERVER_IPS = [ip.strip() for ip in env("SERVER_IPS", "").split(",") if ip.strip()]
 
-# --- TTS (tts_app_streaming 의 내부 API) ------------------------------------
-TTS_API_URL = env("TTS_API_URL", "http://127.0.0.1:8601").rstrip("/")
+DEVICE = env("DEVICE", "cuda:0")
+
+# --- TTS (이 앱이 직접 올리는 Qwen3-TTS CustomVoice 스트리밍 모델) ---------------
 SR = 24000
+TTS_MODEL = _path(env("TTS_MODEL", "./models/Qwen3-TTS-12Hz-1.7B-CustomVoice"))
+TTS_ATTN = env("TTS_ATTN", "sdpa")                      # sdpa / flash_attention_2
+TTS_CACHE_DIR = DATA_DIR / "tts_cache"                  # 같은 문장(인사말 등)은 다시 만들지 않음
+TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+EMIT_EVERY_FRAMES = int(env("EMIT_EVERY_FRAMES", "8"))  # 12Hz → 8프레임 ≈ 0.67초마다 조각
+STREAM_OPTIMIZE = env("STREAM_OPTIMIZE", "1") == "1"    # torch.compile + CUDA graph (시작 시 약 2분)
+TRIM_START_MS = int(env("TRIM_START_MS", "80"))         # 문장 앞 디코더 잡음(약 78ms) 제거
+FADE_IN_MS = int(env("FADE_IN_MS", "10"))
 
 # --- STT / 그림 -------------------------------------------------------------
-DEVICE = env("DEVICE", "cuda:0")
 WHISPER_PATH = _path(env("WHISPER_PATH", "./models/whisper-large-v3-turbo"))
 SDXL_BASE = _path(env("SDXL_BASE", "./models/sdxl-base"))
 SDXL_VAE = _path(env("SDXL_VAE", "./models/sdxl-vae-fp16-fix"))

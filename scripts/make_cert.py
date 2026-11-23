@@ -6,22 +6,26 @@
 2) 그 CA 로 이 서버의 인증서를 발급한다         → certs/cert.pem, certs/key.pem  (.env 의 SERVER_IPS 포함)
 3) 각 PC 가 CA 를 한 번 신뢰하도록 설치 파일 생성 → certs/install_cert.bat (관리자 권한 불필요)
 
-사용: python make_cert.py            서버 인증서만 다시 발급 (CA 는 유지 → 각 PC 재설치 불필요)
-      python make_cert.py --new-ca   CA 부터 새로 만듦 (각 PC 에 다시 설치해야 함)
+사용: python scripts/make_cert.py            서버 인증서만 다시 발급 (CA 는 유지 → 각 PC 재설치 불필요)
+      python scripts/make_cert.py --new-ca   CA 부터 새로 만듦 (각 PC 에 다시 설치해야 함)
 IP 가 바뀌면 .env 의 SERVER_IPS 를 고치고 다시 실행하세요.
 """
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # story_app/ (storybook 패키지)
 
 import datetime
 import ipaddress
 import socket
-import sys
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-import config
+from storybook import config
 
 D = config.CERT_DIR
 D.mkdir(exist_ok=True)

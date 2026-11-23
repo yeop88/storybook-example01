@@ -1,173 +1,40 @@
 """책 만들기 (백그라운드 스레드) — 이야기·음성·그림을 모두 실시간으로.
 
-  LLM 스트리밍 ──줄 완성──▶ 말하기 스레드: TTS API 스트리밍 → PCM 조각을 바로 파일로
+  LLM 스트리밍 ──줄 완성──▶ 말하기 스레드: TTS 스트리밍 → PCM 조각을 바로 파일로
               └─장면 바뀜──▶ 그리기 스레드: SDXL-Lightning → 삽화 (한 장 약 1초)
 
-static/books/<id>/
-  book.json         진행 상황 + 내용 (브라우저 재생기가 계속 읽어 감)
-  p<n>_<i>.pcm      n 쪽 음성의 i 번째 조각 (int16 24kHz mono, 생성되는 대로 추가)
-  img_<j>.png       j 번째 삽화 (0 = 표지). 줄마다 "img" 로 어떤 삽화를 보여 줄지 지정
-                    → 장면이 바뀌는 줄에서 삽화가 바뀜 (쪽마다 1장 이상)
+흐름: 차례 기다리기(scheduler) → 인사말 → LLM 이 쓰는 이벤트를 하나씩 처리(handle) →
+     쪽수가 모자라면 이어 쓰기 / 선택형이면 장 끝에서 아이에게 묻고 고른 대로 이어 쓰기 → 마무리
 """
 
-import json
 import queue
 import random
-import secrets
-import shutil
-import sys
 import threading
 import time
-import uuid
 from datetime import datetime
 
 import numpy as np
 
-import config
-import gpu
-import storyteller
-import textnorm
-import tts_client
-from storyteller import NARRATOR, clean
-
-
-def _sched() -> dict:
-    """책 만들기 차례 관리: 동시에 최대 MAX_BOOKS_AT_ONCE 권, 먼저 누른 순서대로.
-    (TTS 는 곧 재생될 문장부터 만들도록 우선순위를 주므로 2권까지는 둘 다 실시간을 유지)"""
-    if not hasattr(sys, "_story_sched"):
-        sys._story_sched = {"cv": threading.Condition(), "making": [], "waiting": []}
-    return sys._story_sched
-
-
-def queue_status() -> dict:
-    """지금 만드는 책 / 기다리는 책 (화면 표시용)."""
-    s = _sched()
-    with s["cv"]:
-        return {"making": list(s["making"]), "waiting": list(s["waiting"]), "limit": config.MAX_BOOKS_AT_ONCE}
-
-
-def cleanup_old_books():
-    """BOOK_KEEP_DAYS 일보다 오래된 책 지우기 (0 이면 지우지 않음)."""
-    if config.BOOK_KEEP_DAYS <= 0:
-        return 0
-    cutoff = time.time() - config.BOOK_KEEP_DAYS * 86400
-    n = 0
-    for d in config.BOOKS_DIR.iterdir():
-        try:
-            if d.is_dir() and (d / "book.json").stat().st_mtime < cutoff and d.name not in makers():
-                shutil.rmtree(d, ignore_errors=True)
-                n += 1
-        except OSError:
-            pass
-    return n
-
-
-def books_usage() -> tuple[int, int]:
-    """(책 수, 사용 용량 바이트)."""
-    count = size = 0
-    for d in config.BOOKS_DIR.iterdir():
-        if d.is_dir():
-            count += 1
-            size += sum(f.stat().st_size for f in d.iterdir() if f.is_file())
-    return count, size
-
-
-def narrator_instruct(narrator_timbre: str, voice: str, emotion: str) -> str:
-    """해설 한 줄의 말투 지시 (책 만들 때와 인사말 미리 만들기에서 똑같이 써야 캐시가 맞음)."""
-    base = " ".join(x for x in (narrator_timbre, config.VOICES[voice]) if x)
-    return " ".join(x for x in (base, f"이번 문장은 {emotion} 말하세요." if emotion else "") if x)
-
-
-def prewarm_greetings():
-    """서버 시작 시 모든 해설자 × 해설 느낌 × 인사말을 낮은 우선순위로 미리 만들어 둠
-    → 동화 만들기를 누르면 인사말이 캐시에서 바로 나옴 (TTS 서버가 같은 문장을 캐시)."""
-    if getattr(sys, "_story_prewarm", False):
-        return
-    sys._story_prewarm = True
-
-    def run():
-        for _ in range(60):  # TTS 서버가 준비될 때까지 (최대 약 5분)
-            if tts_client.health().get("ready"):
-                break
-            time.sleep(5)
-        for narrator, (speaker, timbre) in config.NARRATORS.items():
-            for voice in config.VOICES:
-                for text in config.GREETINGS:
-                    try:
-                        tts_client.synthesize(text, speaker, "Korean",
-                                              narrator_instruct(timbre, voice, config.GREETING_EMOTION), priority=1000)
-                    except Exception:  # noqa: BLE001
-                        return
-
-    threading.Thread(target=run, daemon=True, name="greeting-prewarm").start()
-
-
-def book_dir(book_id: str):
-    return config.BOOKS_DIR / book_id
-
-
-def read_book(book_id: str) -> dict | None:
-    try:
-        return json.loads((book_dir(book_id) / "book.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def list_books() -> list[dict]:
-    books = [b for d in config.BOOKS_DIR.iterdir() if d.is_dir() and (b := read_book(d.name))]
-    return sorted(books, key=lambda b: b.get("created", ""), reverse=True)
-
-
-def delete_book(book_id: str):
-    shutil.rmtree(book_dir(book_id), ignore_errors=True)
-
-
-def page_audio(book_id: str, n: int) -> np.ndarray:
-    """저장된 조각을 이어 붙인 n 쪽 음성 (다운로드용)."""
-    b = read_book(book_id)
-    k = b["pages"][n]["chunks"] if b else 0
-    parts = [np.frombuffer((book_dir(book_id) / f"p{n}_{i}.pcm").read_bytes(), dtype="<i2") for i in range(k)]
-    return np.concatenate(parts).astype(np.float32) / 32768 if parts else np.zeros(0, dtype=np.float32)
-
-
-def _new_page(scene: str = "", cast=None, cover: bool = False) -> dict:
-    return {"scene": scene, "cast": cast or [], "cover": cover, "lines": [], "img0": None,
-            "chunks": 0, "duration": 0.0, "audio_done": False}
+from storybook import config
+from storybook.application import scheduler
+from storybook.domain import choices, textnorm
+from storybook.domain.story_format import NARRATOR, clean, cut_after_choice, cut_before_next_chapter, has_foreign
+from storybook.domain.voices import emotion_instruct, narrator_instruct, pick_speaker
+from storybook.infra import book_store, llm, painter, tts
+from storybook.infra.runtime import shared
 
 
 class ChoiceStop(Exception):
-    """LLM 이 장 끝 선택(choice)을 썼음 → 쓰기를 멈추고 아이의 선택을 기다림."""
+    """장 끝에서 쓰기를 멈추고 아이의 선택을 기다림. choice 가 None 이면 질문은 따로 만듦."""
 
     def __init__(self, choice: dict | None):
         super().__init__("choice")
-        self.choice = choice  # None 이면 LLM 이 질문 없이 다음 장을 시작하려 한 것 → 질문은 따로 만듦
-
-
-def _cut_raw_after_choice(raw: list[str]):
-    """이어 쓰기용 원문을 choice 줄까지만 남김 (LLM 이 그 뒤를 더 썼어도 버림)."""
-    text = "".join(raw)
-    i = text.rfind('"choice"')
-    j = text.find("\n", i) if i != -1 else -1
-    raw[:] = [text[: j + 1] if j != -1 else text + "\n"]
-
-
-def _cut_raw_before_next_chapter(raw: list[str]):
-    """이어 쓰기용 원문에서 다음 장을 시작한 page/chapter 줄부터 뒤를 버림."""
-    lines = "".join(raw).split("\n")
-    while lines:
-        ev = storyteller._event(lines.pop())
-        if ev and ev.get("type") in ("page", "chapter"):
-            break
-    while lines and (ev := storyteller._event(lines[-1])) and ev.get("type") == "chapter":
-        lines.pop()
-    raw[:] = ["\n".join(lines) + "\n"]
+        self.choice = choice
 
 
 def makers() -> dict:
-    """만드는 중인 책 (선택형 동화의 답을 전달하려고 보관)."""
-    if not hasattr(sys, "_story_makers"):
-        sys._story_makers = {}
-    return sys._story_makers
+    """만드는 중인 책 (선택형 동화의 대답을 전달하려고 보관)."""
+    return shared("makers", dict)
 
 
 def answer_choice(book_id: str, i: int, heard: str = "") -> bool:
@@ -178,42 +45,23 @@ def answer_choice(book_id: str, i: int, heard: str = "") -> bool:
     return True
 
 
-def match_choice(text: str, options: list[str]) -> int | None:
-    """말한 내용 → 선택지 번호. 선택지 낱말이 들어 있으면 그것, 아니면 '첫 번째/두 번째' 같은 순서 말."""
-    import re
-    t = re.sub(r"[^\w]", "", text or "")
-    if not t:
-        return None
-
-    def grams(x):
-        x = re.sub(r"[^\w]", "", x)
-        return {x[i:i + 2] for i in range(len(x) - 1)} or {x}
-
-    # 두 글자 조각이 겹치는 수 + 선택지 낱말(예: '숲')이 통째로 들어 있으면 가산점
-    scores = [len(grams(o) & grams(t)) + 2 * sum(1 for w in re.findall(r"\w+", o) if w in t) for o in options]
-    best = max(scores)
-    if best and scores.count(best) == 1:
-        return scores.index(best)
-    ordinals = [("첫", "하나", "일번", "1번", "1"), ("두", "둘", "이번", "2번", "2"), ("세", "셋", "삼번", "3번", "3")]
-    for i, words in enumerate(ordinals):
-        if i < len(options) and any(w in t for w in words):
-            return i
-    return None
+def _new_page(scene: str = "", cast=None, cover: bool = False) -> dict:
+    return {"scene": scene, "cast": cast or [], "cover": cover, "lines": [], "img0": None,
+            "chunks": 0, "duration": 0.0, "audio_done": False}
 
 
 class BookMaker:
     def __init__(self, request: dict):
-        # 날짜(정렬용) + 추측할 수 없는 64비트 난수 → 다른 사람이 책 주소를 짐작해 열 수 없음
-        self.id = datetime.now().strftime("%Y%m%d_%H%M%S_") + secrets.token_hex(8)
-        self.dir = book_dir(self.id)
+        self.id = book_store.new_id()
+        self.dir = book_store.book_dir(self.id)
         self.dir.mkdir(parents=True)
-        narrator = config.NARRATORS.get(request.get("narrator"), next(iter(config.NARRATORS.values())))
-        self.req = {**request, "speaker": narrator[0], "narrator_timbre": narrator[1]}
-        request = self.req
+        speaker, timbre = config.NARRATORS.get(request.get("narrator"), next(iter(config.NARRATORS.values())))
+        self.req = {**request, "speaker": speaker, "narrator_timbre": timbre}
         self.cast: dict[str, tuple[str, str]] = {}  # 인물 → (화자, 음색·말투 지시)
         self.errors: list[str] = []
-        self.answers: queue.Queue = queue.Queue()  # 선택형 동화: 아이의 선택
-        self.ref_img = None  # 표지 그림 (이후 삽화가 주인공 모습을 따라 그리도록)
+        self.answers: queue.Queue = queue.Queue()   # 선택형 동화: 아이의 선택
+        self.ref_img = None                         # 표지 그림 (이후 삽화가 주인공 모습을 따라 그리도록)
+        self.cur_img = None                         # 지금 쓰고 있는 줄에 걸릴 삽화 번호
         # TTS 우선순위 계산용: 첫 음성이 나온 시각, 지금까지 만든 음성 길이, 아이가 고르느라 멈춘 시간
         self.t_created = time.time()
         self.t_first_audio: float | None = None
@@ -221,29 +69,25 @@ class BookMaker:
         self.paused = 0.0
         self._lock = threading.RLock()
         self.book = {
-            "id": self.id, "created": datetime.now().strftime("%Y-%m-%d %H:%M"), "request": request,
+            "id": self.id, "created": datetime.now().strftime("%Y-%m-%d %H:%M"), "request": self.req,
             "status": "waiting", "message": "📖 책을 펼치는 중...", "error": "",
-            "title": "", "characters": [], "pages": [], "illus": [], "chapters": [], "story_done": False, "choice": None,
+            "title": "", "characters": [], "pages": [], "illus": [], "chapters": [], "story_done": False,
+            "choice": None,
         }
         self._save()
 
     def start(self) -> str:
         makers()[self.id] = self
-        cleanup_old_books()
+        book_store.cleanup_old(config.BOOK_KEEP_DAYS, set(makers()))
         threading.Thread(target=self._run, daemon=True, name=f"book-{self.id}").start()
         return self.id
 
+    def answer(self, i: int, heard: str = ""):
+        self.answers.put((i, heard))
+
     # --- 저장 ---------------------------------------------------------------
     def _save(self):
-        data = json.dumps(self.book, ensure_ascii=False)
-        tmp = self.dir / "book.json.tmp"
-        tmp.write_text(data, encoding="utf-8")
-        for _ in range(50):  # 브라우저가 읽는 중이면 Windows 에서 교체가 잠깐 막힐 수 있음
-            try:
-                tmp.replace(self.dir / "book.json")
-                return
-            except PermissionError:
-                time.sleep(0.01)
+        book_store.write_book(self.id, self.book)
 
     def _update(self, **kw):
         with self._lock:
@@ -254,9 +98,7 @@ class BookMaker:
         with self._lock:
             page = self.book["pages"][n]
             i = page["chunks"]
-            tmp = self.dir / f"p{n}_{i}.tmp"
-            tmp.write_bytes((np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes())
-            tmp.replace(self.dir / f"p{n}_{i}.pcm")
+            book_store.write_chunk(self.id, n, i, pcm)
             page["chunks"] = i + 1
             page["duration"] = round(page["duration"] + len(pcm) / config.SR, 2)
             self.audio_total += len(pcm) / config.SR
@@ -265,33 +107,34 @@ class BookMaker:
                 self.book["first_audio_seconds"] = round(self.t_first_audio - self.t_created, 2)
             self._save()
 
-    # --- 목소리 배정 -----------------------------------------------------------
+    def _add_line(self, n: int, line: dict, speak_q: queue.Queue):
+        with self._lock:
+            lines = self.book["pages"][n]["lines"]
+            img = self.cur_img if n == len(self.book["pages"]) - 1 and n > 0 else None
+            lines.append({**line, "chunk": None, "img": img})
+            k = len(lines) - 1
+            self._save()
+        speak_q.put((n, k))
+
+    # --- 목소리 -----------------------------------------------------------------
     def _add_character(self, c: dict):
         r = self.req
         voice = c["voice"] if c["voice"] in config.VOICE_TYPES else "creature"
-        speaker, timbre = config.VOICE_TYPES[voice]
-        if r["cast"] == "same":
-            speaker = r["speaker"]
-        else:  # 해설자·다른 인물과 겹치지 않게, 대신 고를 때도 같은 성별·나이대 목소리 안에서
-            used = {r["speaker"]} | {s for s, _ in self.cast.values()}
-            cands = [speaker] + [s for s in config.VOICE_ALTS.get(voice, []) if s != speaker]
-            free = [s for s in cands if s not in used]
-            not_narrator = [s for s in cands if s != r["speaker"]]
-            speaker = (free or not_narrator or cands)[0]
+        default, timbre = config.VOICE_TYPES[voice]
+        speaker = pick_speaker(voice, default, config.VOICE_ALTS.get(voice, []), r["speaker"],
+                               {s for s, _ in self.cast.values()}, same_as_narrator=r["cast"] == "same")
         self.cast[c["name"]] = (speaker, " ".join(x for x in (timbre, c["tone"]) if x))
         with self._lock:
             self.book["characters"].append({**c, "voice": voice, "speaker": speaker})
             self._save()
 
     def _voice(self, line: dict) -> tuple[str, str]:
-        """줄 하나의 (화자, 지시문) = 인물 음색·기본 말투(또는 해설 느낌) + 이 줄의 감정."""
+        """줄 하나의 (화자, 말투 지시) = 인물 음색·기본 말투(또는 해설 느낌) + 이 줄의 감정."""
         if line["who"] in self.cast:
             speaker, base = self.cast[line["who"]]
-        else:
-            return self.req["speaker"], narrator_instruct(self.req.get("narrator_timbre", ""), self.req["voice"],
-                                                          line.get("emotion", ""))
-        emotion = line.get("emotion", "")
-        return speaker, " ".join(x for x in (base, f"이번 문장은 {emotion} 말하세요." if emotion else "") if x)
+            return speaker, emotion_instruct(base, line.get("emotion", ""))
+        return self.req["speaker"], narrator_instruct(self.req["narrator_timbre"], config.VOICES[self.req["voice"]],
+                                                      line.get("emotion", ""))
 
     def _priority(self) -> float:
         """TTS 우선순위 = 재생보다 앞서 만들어 둔 음성(초). 작을수록(곧 소리가 끊길 책일수록) 먼저 만듦."""
@@ -302,41 +145,17 @@ class BookMaker:
 
     # --- 실행 ---------------------------------------------------------------
     def _run(self):
-        self._acquire_turn()
+        t0 = time.time()
+        scheduler.acquire(self.id, on_wait=lambda ahead: self._update(
+            status="waiting", message=f"⏳ 앞에 {ahead}권이 만들어지는 중이에요. 차례가 되면 바로 시작해요."))
+        with self._lock:
+            self.book["queue_seconds"] = round(time.time() - t0, 2)
         try:
             self._make()
         except Exception as e:  # noqa: BLE001
             self._update(status="error", error=str(e), message=f"만들기 실패: {e}", story_done=True)
         finally:
-            self._release_turn()
-
-    def _acquire_turn(self, resumed: bool = False):
-        """차례 기다리기 (동시에 최대 MAX_BOOKS_AT_ONCE 권). 아이의 선택 뒤 다시 이어 쓰는 책은 맨 앞에 섬."""
-        s = _sched()
-        t0 = time.time()
-        with s["cv"]:
-            if resumed:
-                s["waiting"].insert(0, self.id)
-            else:
-                s["waiting"].append(self.id)
-            while not (len(s["making"]) < config.MAX_BOOKS_AT_ONCE and s["waiting"][0] == self.id):
-                if not resumed:
-                    ahead = s["waiting"].index(self.id) + len(s["making"])
-                    self._update(status="waiting",
-                                 message=f"⏳ 앞에 {ahead}권이 만들어지는 중이에요. 차례가 되면 바로 시작해요.")
-                s["cv"].wait(1.0)
-            s["waiting"].remove(self.id)
-            s["making"].append(self.id)
-        if not resumed:
-            with self._lock:
-                self.book["queue_seconds"] = round(time.time() - t0, 2)
-
-    def _release_turn(self):
-        s = _sched()
-        with s["cv"]:
-            if self.id in s["making"]:
-                s["making"].remove(self.id)
-            s["cv"].notify_all()
+            scheduler.release(self.id)
 
     def _make(self):
         r = self.req
@@ -350,19 +169,27 @@ class BookMaker:
             w.start()
 
         pages = self.book["pages"]
-        if r["language"] == "Korean":
+        if r["language"] == "Korean":  # 누르자마자 인사말 (미리 만들어 둔 음성) → 그동안 LLM 이 제목을 씀
             pages.append(_new_page(cover=True))
             self._add_line(0, {"who": NARRATOR, "text": random.choice(config.GREETINGS),
                                "emotion": config.GREETING_EMOTION}, speak_q)
+
+        total = r["chapters"] * r["pages_per"]  # 정확히 지킬 전체 쪽수
+        per = r["pages_per"]
+        outline = r.get("outline") or []
+        llm_titles: dict[int, str] = {}         # LLM 이 붙인 장 제목
+        providers = [r["llm"]] + [p for p in config.LLM_PROVIDERS if p != r["llm"]]  # 실패하면 다음 서버로
+        state = {"cover_drawn": False, "intro_done": False}
+        asked: set[int] = set()                 # 선택 질문을 이미 한 장 번호
+
+        def content_pages() -> int:
+            return max(0, len(pages) - 1)
 
         def ensure_cover():
             if not pages:
                 with self._lock:
                     pages.append(_new_page(cover=True))
                     self._save()
-
-        cover_drawn = False
-        self.cur_img = None  # 지금 쓰고 있는 줄에 걸릴 삽화 번호
 
         def new_illus(n: int, scene: str, cast: list) -> int:
             """삽화 하나 추가 → 바로 그리기 대기열로. 이후 줄은 이 삽화를 보여 줌."""
@@ -377,23 +204,14 @@ class BookMaker:
             draw_q.put(j)
             return j
 
-        total = r["chapters"] * r["pages_per"]     # 정확히 지킬 전체 쪽수
-        per = r["pages_per"]
-        outline = r.get("outline") or []
-        llm_titles: dict[int, str] = {}           # LLM 이 붙인 장 제목
-
-        def content_pages() -> int:
-            return max(0, len(pages) - 1)
-
         def chapter_title(c: int) -> str:
             mine = outline[c - 1].get("title", "") if c - 1 < len(outline) else ""
             return mine or llm_titles.get(c, "")
 
         def add_page(scene: str, cast: list) -> int:
-            nonlocal cover_drawn
-            if not cover_drawn:  # 표지는 인물 소개가 끝난 뒤 그려야 생김새가 맞음
+            if not state["cover_drawn"]:  # 표지는 인물 소개가 끝난 뒤 그려야 생김새가 맞음
                 new_illus(0, pages[0]["scene"], [])
-                cover_drawn = True
+                state["cover_drawn"] = True
             with self._lock:
                 pages.append(_new_page(scene, cast))
                 n = len(pages) - 1
@@ -417,27 +235,21 @@ class BookMaker:
             if len(pages) == 1:
                 add_page(pages[0]["scene"], [])
 
-        intro_done = [False]
-
         def need_intro():
             """LLM 이 도입 인사를 빠뜨렸으면 바로 넣음 → 표지에서 인물 소개·1쪽을 쓰는 동안 읽을 거리."""
-            if not intro_done[0] and self.book["title"] and len(pages) == 1:
-                intro_done[0] = True
+            if not state["intro_done"] and self.book["title"] and len(pages) == 1:
+                state["intro_done"] = True
                 self._add_line(0, {"who": NARRATOR, "text": "자, 그럼 이야기를 시작해 볼까요?",
                                    "emotion": "설레는 마음으로 다정하게, 아이에게 말을 건네듯"}, speak_q)
 
-        providers = [r["llm"]] + [p for p in config.LLM_PROVIDERS if p != r["llm"]]  # 실패하면 다음 서버로
-
         def ko(text: str) -> str:
-            """한국어 동화에 한자·중국어가 섞이면 읽기 전에 한글로 고침."""
-            if r["language"] == "Korean" and storyteller.has_foreign(text):
-                fixed = storyteller.fix_foreign(providers[0], text)
+            """한국어 동화에 한자·중국어·영어 단어가 섞이면 읽기 전에 한글로 고침."""
+            if r["language"] == "Korean" and has_foreign(text):
+                fixed = llm.fix_foreign(providers[0], text)
                 with self._lock:
                     self.book.setdefault("fixed", []).append({"from": text, "to": fixed})
                 return fixed
             return text
-
-        asked: set[int] = set()  # 선택 질문을 이미 한 장 번호
 
         def at_boundary():
             """선택형: 한 장을 다 쓰고 다음 장을 시작하려 하면 멈추고 아이에게 물음 (LLM 이 질문을 빠뜨려도)."""
@@ -460,8 +272,8 @@ class BookMaker:
                                    "emotion": "설레고 다정하게, 이야기를 시작하듯 또박또박"}, speak_q)
             elif typ == "intro":
                 text = clean(ev.get("text"))
-                if text and not intro_done[0] and len(pages) == 1:
-                    intro_done[0] = True
+                if text and not state["intro_done"] and len(pages) == 1:
+                    state["intro_done"] = True
                     self._add_line(0, {"who": NARRATOR, "text": text,
                                        "emotion": clean(ev.get("emotion")) or "다정하게 말을 건네듯 천천히"}, speak_q)
             elif typ == "cover":
@@ -525,11 +337,9 @@ class BookMaker:
             """LLM 서버가 실패하면 다음 서버로 넘어가 (쓴 데까지 이어서) 계속 씀."""
             last = None
             for prov in list(providers):
+                gen = (llm.stream_story(prov, r, raw) if not raw
+                       else llm.continue_story(prov, r, raw, content_pages(), choice))
                 try:
-                    if not raw:
-                        gen = storyteller.stream_story(prov, r, raw)
-                    else:
-                        gen = storyteller.continue_story(prov, r, raw, content_pages(), choice)
                     for ev in gen:
                         handle(ev)
                     if prov != r["llm"]:
@@ -538,10 +348,8 @@ class BookMaker:
                     return
                 except ChoiceStop as c:
                     gen.close()  # 지금 바로 LLM 연결을 끊음 (안 그러면 아이가 고르는 동안 서버가 남은 글을 계속 씀)
-                    if c.choice is None:
-                        _cut_raw_before_next_chapter(raw)
-                    else:
-                        _cut_raw_after_choice(raw)
+                    text = "".join(raw)
+                    raw[:] = [cut_before_next_chapter(text) if c.choice is None else cut_after_choice(text)]
                     raise
                 except Exception as e:  # noqa: BLE001
                     last = e
@@ -558,8 +366,7 @@ class BookMaker:
                 write(choice)
                 choice = ""
             except ChoiceStop as c:  # 장 끝에서 아이에게 묻고, 고른 대로 다음 장을 이어 씀
-                ch = c.choice or storyteller.make_choice(providers[0], r, raw)
-                choice = self._ask_choice(ch, speak_q)
+                choice = self._ask_choice(c.choice or llm.make_choice(providers[0], raw), speak_q)
                 continue
             if content_pages() >= total or not self.book["title"]:
                 break
@@ -569,7 +376,7 @@ class BookMaker:
             self._update(message=f"✍️ 남은 {total - content_pages()}쪽을 이어서 쓰는 중...")
         if not pages or len(pages) == 1 and not pages[0]["lines"]:
             raise RuntimeError("AI 가 이야기를 만들지 못했습니다. 다시 시도해 주세요.")
-        if not cover_drawn:
+        if not state["cover_drawn"]:
             new_illus(0, pages[0]["scene"], [])
         speak_q.put(("end", len(pages) - 1))
         self._update(story_done=True, status="making", story_seconds=round(time.time() - t0, 1),
@@ -587,9 +394,8 @@ class BookMaker:
         """장 끝: 질문을 읽어 주고 아이의 선택을 기다림 (버튼 또는 말). 고른 선택지 글을 돌려줌."""
         n = len(self.book["pages"]) - 1
         opts = ch["options"]
-        nums = ["첫 번째", "두 번째", "세 번째"]
-        ask = ch["question"] + " " + " ".join(f"{nums[i]}, {o}." for i, o in enumerate(opts))
-        self._add_line(n, {"who": NARRATOR, "text": ask, "emotion": "궁금한 듯 밝게, 아이에게 물어보듯 또박또박"}, speak_q)
+        self._add_line(n, {"who": NARRATOR, "text": choices.question_text(ch["question"], opts),
+                           "emotion": "궁금한 듯 밝게, 아이에게 물어보듯 또박또박"}, speak_q)
         with self._lock:
             k = len(self.book["pages"][n]["lines"]) - 1
             self.book["choice"] = {"no": len(self.book.get("choices", [])) + 1, "page": n, "line": k,
@@ -600,14 +406,13 @@ class BookMaker:
         while not self.answers.empty():  # 앞선 질문에 두 번 누른 답 등은 버림
             self.answers.get_nowait()
         # 아이가 고르는 동안에는 차례를 양보 → 기다리던 다른 사람의 책을 먼저 만들 수 있음
-        self._release_turn()
+        scheduler.release(self.id)
         t_wait = time.time()
         try:
             i, heard = self.answers.get(timeout=300)
         except queue.Empty:  # 5분 동안 대답이 없으면 첫 번째로
             i, heard = 0, "(대답 없음)"
         # 질문을 읽은 뒤 고를 때까지 재생이 멈춰 있었음 → 앞서 만든 음성이 그만큼 그대로 남아 있음
-        # (질문이 실제로 재생된 시각은 모르므로, 기다린 시간에서 남은 음성만큼은 빼고 반영)
         self.paused += max(0.0, (time.time() - t_wait) - max(0.0, self._priority()))
         pick = opts[i]
         with self._lock:  # 답은 바로 기록 (선택 칸이 곧바로 사라지게)
@@ -618,21 +423,8 @@ class BookMaker:
             self._save()
         self._add_line(n, {"who": NARRATOR, "text": f"좋아요! {pick}. 그럼 이야기를 계속해 볼까요?",
                            "emotion": "신이 나서 밝고 경쾌하게"}, speak_q)
-        self._acquire_turn(resumed=True)
-        self._update(status="writing", message=f"✍️ '{pick}' 이야기를 이어서 쓰는 중...")
+        scheduler.acquire(self.id, resumed=True)  # 다시 이어 쓸 때는 대기열 맨 앞
         return pick
-
-    def answer(self, i: int, heard: str = ""):
-        self.answers.put((i, heard))
-
-    def _add_line(self, n: int, line: dict, speak_q: queue.Queue):
-        with self._lock:
-            lines = self.book["pages"][n]["lines"]
-            img = self.cur_img if n == len(self.book["pages"]) - 1 and n > 0 else None
-            lines.append({**line, "chunk": None, "img": img})
-            k = len(lines) - 1
-            self._save()
-        speak_q.put((n, k))
 
     # --- 말하기: 줄마다 TTS 스트리밍 → 조각을 바로 파일로 -------------------------
     def _speaker(self, q: queue.Queue):
@@ -651,13 +443,13 @@ class BookMaker:
                 line.update(chunk=page["chunks"], speaker=speaker, instruct=instruct)
             try:
                 text = textnorm.to_speech(line["text"]) if self.req["language"] == "Korean" else line["text"]
-                for pcm in tts_client.stream(text, speaker, self.req["language"], instruct, priority=self._priority()):
+                for pcm in tts.stream(text, speaker, self.req["language"], instruct, priority=self._priority()):
                     self._add_chunk(n, pcm)
             except Exception as e:  # noqa: BLE001
                 self.errors.append(f"음성 {n}-{k}: {e}")
             self._add_chunk(n, pause)
 
-    # --- 그리기: 삽화가 생기는 대로 바로 (GPU 상주, 한 장 약 1초) ---------------------
+    # --- 그리기: 삽화가 생기는 대로 바로 ---------------------------------------------
     def _drawer(self, q: queue.Queue):
         style = config.STYLES[self.req["style"]]
         seed = random.randint(0, 2**31 - 1)  # 한 권 안에서는 같은 시드 → 그림체 일관성
@@ -675,8 +467,8 @@ class BookMaker:
             t = time.time()
             try:
                 # 표지를 먼저 그리고, 이후 삽화는 표지 속 주인공 모습을 참고해서 그림 (IP-Adapter)
-                img = gpu.paint(prompt, seed=seed, ref=None if cover else self.ref_img)
-                img.save(self.dir / f"img_{j}.png")
+                img = painter.paint(prompt, seed=seed, ref=None if cover else self.ref_img)
+                img.save(book_store.image_path(self.id, j))
                 if cover:
                     self.ref_img = img
                 ok = True

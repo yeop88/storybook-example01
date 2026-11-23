@@ -12,7 +12,7 @@ import re
 
 import streamlit as st
 
-import config
+from storybook import config
 
 BASE_URL = "app/static/books/"
 _BTN = "padding:6px 14px;border-radius:999px;border:1px solid #d9c6a5;background:#fff;color:#3b2f2f;cursor:pointer;"

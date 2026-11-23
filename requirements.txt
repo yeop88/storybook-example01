@@ -1,0 +1,34 @@
+# AI 동화 낭독기 (story_app) 의존성 — Python 3.12, CUDA 12.8 (Windows)
+# 설치: uv venv --python 3.12 .venv && uv pip install --python .venv\Scripts\python.exe -r requirements.txt --index-strategy unsafe-best-match
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+# 모델 실행
+torch==2.11.0+cu128
+torchaudio==2.11.0+cu128
+triton-windows==3.9.0.post30 ; sys_platform == "win32"   # TTS 최적화(torch.compile)
+# Qwen3-TTS 스트리밍 변형판 (커뮤니티, Apache-2.0) — CustomVoice 스트리밍 생성
+qwen-tts @ git+https://github.com/dffdeeq/Qwen3-TTS-streaming@13ef823ffe76aec4ac7e35d3fec28ecfc8d7427a
+transformers==4.57.3
+accelerate==1.12.0
+diffusers==0.35.2
+safetensors==0.8.0
+huggingface-hub==0.36.2
+
+# 웹 · LLM
+streamlit==1.67.0
+openai==3.57.0
+httpx==0.28.1
+requests==2.34.2
+websockets==17.4
+python-dotenv==1.2.4
+
+# 오디오 · 이미지 · 데이터
+numpy==2.5.5
+pandas==3.1.1
+pillow==12.3.0
+soundfile==0.14.0
+librosa==1.0.1
+
+# 인증서 · 사내망
+cryptography==50.0.2
+truststore==0.10.5

@@ -1,19 +1,9 @@
-"""이야기 쓰기: 내부 네트워크 OpenAI 호환 LLM (think 끔), 실시간 스트리밍.
+"""사내 LLM 어댑터 (OpenAI 호환 서버만 사용, think 끔).
 
-LLM 이 한 줄에 JSON 하나씩(JSON Lines) 쓰게 하고, 줄이 완성되는 즉시 이벤트로 넘깁니다.
+LLM 이 한 줄에 JSON 하나씩(JSON Lines, domain/story_format.py) 쓰게 하고, 줄이 완성되는 즉시 이벤트로 넘깁니다.
 → 이야기를 다 쓰기 전에 제목·첫 문장부터 바로 읽기 시작할 수 있음.
-
-이벤트 종류
-  {"type": "title", "text"}
-  {"type": "intro", "text", "emotion"}            표지에서 제목 다음에 읽을 도입 인사
-  {"type": "cover", "scene"}
-  {"type": "character", "name", "look", "voice", "tone"}
-  {"type": "page", "scene", "cast": [이름...]}     새 페이지 + 첫 삽화
-  {"type": "scene", "scene", "cast": [이름...]}    페이지 중간 삽화 전환 (다음 줄부터)
-  {"type": "line", "who", "text", "emotion"}
 """
 
-import json
 import re
 from collections.abc import Iterator
 from functools import lru_cache
@@ -21,9 +11,11 @@ from functools import lru_cache
 import httpx
 from openai import OpenAI
 
-import config
+from storybook import config
+from storybook.domain.story_format import (NARRATOR, clean, has_foreign, parse_line, parse_loose, story_text,
+                                           strip_foreign)
 
-NARRATOR = "해설"
+_NO_THINK = {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 @lru_cache(maxsize=None)
@@ -89,55 +81,18 @@ SYSTEM = f"""당신은 아이들을 위한 그림 동화 작가이자 오디오�
 - scene, look 은 그림 생성용이므로 반드시 영어로 쓰고, 글자나 말풍선은 넣지 마세요."""
 
 
-def clean(s) -> str:
-    return re.sub(r"\s+", " ", str(s or "")).strip().strip("\"'“”‘’")
-
-
-def _event(raw: str) -> dict | None:
-    raw = raw.strip().strip("`").strip()
-    if raw.startswith("json"):
-        raw = raw[4:].strip()
-    if not raw.startswith("{"):
-        return None
-    try:
-        ev = json.loads(raw)
-    except json.JSONDecodeError:
-        ev = _loose(raw)  # 작은 모델이 괄호를 틀리게 닫는 경우 등
-    return ev if isinstance(ev, dict) and ev.get("type") else None
-
-
-_FIELD = re.compile(r'"(type|text|scene|name|look|voice|tone|who|emotion|title)"\s*:\s*"((?:[^"\\]|\\.)*)"')
-_NO = re.compile(r'"no"\s*:\s*(\d+)')
-_CAST = re.compile(r'"cast"\s*:\s*\[([^\]]*)\]')
-_OPTIONS = re.compile(r'"options"\s*:\s*\[([^\]]*)\]')
-_QUESTION = re.compile(r'"question"\s*:\s*"((?:[^"\\]|\\.)*)"')
-
-
-def _loose(raw: str) -> dict | None:
-    """깨진 JSON 한 줄에서 필드만 뽑아냄."""
-    ev = {k: v.replace('\\"', '"') for k, v in _FIELD.findall(raw)}
-    if m := _NO.search(raw):
-        ev["no"] = int(m.group(1))
-    if m := _OPTIONS.search(raw):
-        ev["options"] = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-    if m := _QUESTION.search(raw):
-        ev["question"] = m.group(1)
-    if m := _CAST.search(raw):
-        ev["cast"] = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-    return ev or None
-
-
-def _request_text(req: dict) -> str:
+def request_text(req: dict) -> str:
+    """사용자가 고른 옵션 → LLM 에게 줄 요청문."""
     c, p = req["chapters"], req["pages_per"]
     total = c * p
     lang = "영어(English) — text 만 영어, emotion·tone 은 한국어" if req["language"] == "English" else "한국어"
     out = [f"주제: {req['theme']}", f"독자: {config.AGES[req['age']]}", f"본문 언어: {lang}"]
+    outline = req.get("outline") or []
     if c > 1:
         out.append(f"구성: {c}개 장, 장마다 정확히 {p}쪽 → 전체 정확히 {total}쪽 (page no 1~{total})")
         for i in range(c):
-            o = (req.get("outline") or [{}] * c)[i] if i < len(req.get("outline") or []) else {}
-            first, last = i * p + 1, (i + 1) * p
-            line = f"  {i + 1}장 (page {first}~{last})"
+            o = outline[i] if i < len(outline) else {}
+            line = f"  {i + 1}장 (page {i * p + 1}~{(i + 1) * p})"
             if o.get("title"):
                 line += f" 제목: {o['title']}"
             if o.get("plot"):
@@ -158,7 +113,7 @@ def _request_text(req: dict) -> str:
 def _stream(provider: str, messages: list[dict], raw: list[str]) -> Iterator[dict]:
     stream = client(provider).chat.completions.create(
         model=model_name(provider), messages=messages, max_tokens=12000, temperature=0.8, stream=True,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},  # think 끔
+        extra_body=_NO_THINK,
     )
     buf = ""
     try:
@@ -170,10 +125,10 @@ def _stream(provider: str, messages: list[dict], raw: list[str]) -> Iterator[dic
             buf += piece
             *done, buf = buf.split("\n")
             for line in done:
-                if ev := _event(line):
+                if ev := parse_line(line):
                     yield ev
         for line in buf.split("\n"):
-            if ev := _event(line):
+            if ev := parse_line(line):
                 yield ev
     finally:
         # 중간에 멈추면(선택형 질문 등) 연결을 바로 끊어 서버가 남은 글을 계속 쓰지 않게 → 다음 요청이 바로 시작
@@ -182,23 +137,22 @@ def _stream(provider: str, messages: list[dict], raw: list[str]) -> Iterator[dic
 
 def stream_story(provider: str, req: dict, raw: list[str]) -> Iterator[dict]:
     """이야기 이벤트를 쓰는 대로. raw 에 원문을 모아 둠 (이어 쓰기용)."""
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": _request_text(req)}]
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": request_text(req)}]
     yield from _stream(provider, messages, raw)
 
 
 def continue_story(provider: str, req: dict, raw: list[str], pages_done: int, choice: str = "") -> Iterator[dict]:
-    """쪽수가 모자랄 때: 지금까지 쓴 내용 뒤에 이어서 나머지 쪽을 쓰게 함."""
+    """쪽수가 모자라거나 아이가 선택한 뒤: 지금까지 쓴 내용 뒤에 이어서 씀."""
     total = req["chapters"] * req["pages_per"]
     per = req["pages_per"]
-    so_far = "".join(raw)
     chapter_hint = ""
     if req["chapters"] > 1 and pages_done % per == 0 and pages_done < total:
         nxt = pages_done // per + 1
         chapter_hint = f' 다음 쪽부터 {nxt}장이 시작되니, 먼저 {{"type": "chapter", "no": {nxt}, "title": "장 제목"}} 줄을 쓰세요.'
     messages = [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": _request_text(req)},
-        {"role": "assistant", "content": so_far},
+        {"role": "user", "content": request_text(req)},
+        {"role": "assistant", "content": "".join(raw)},
         {"role": "user", "content": (
             f"아직 {pages_done}쪽까지만 썼습니다. 요청한 전체 쪽수는 정확히 {total}쪽입니다. "
             f"page no {pages_done + 1} 부터 {total} 까지 같은 JSON Lines 형식으로 이어서 쓰고, 마지막 쪽에서 이야기를 마무리하세요. "
@@ -209,62 +163,38 @@ def continue_story(provider: str, req: dict, raw: list[str], pages_done: int, ch
     yield from _stream(provider, messages, raw)
 
 
-# ---------------------------------------------------------------------------
-# 외국 글자 섞임 수정 (Qwen 계열 LLM 이 가끔 한국어 문장에 한자·중국어를 섞음 → TTS 가 중국어로 읽음)
-# ---------------------------------------------------------------------------
-_FOREIGN = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
-
-
-_LATIN_WORD = re.compile(r"[A-Za-z]{3,}")
-
-
-def has_foreign(text: str) -> bool:
-    """한국어 문장에 한자·일본어 글자나 영어 단어(3글자 이상)가 섞였는지."""
-    return bool(_FOREIGN.search(text or "") or _LATIN_WORD.search(text or ""))
-
-
 def fix_foreign(provider: str, text: str) -> str:
-    """한자·중국어·일본어가 섞인 한국어 문장을 자연스러운 한글 문장으로 (짧은 LLM 호출, 실패하면 그 글자만 지움)."""
+    """한자·중국어·일본어·영어 단어가 섞인 한국어 문장 → 자연스러운 한글 문장 (짧은 호출, 실패하면 그 글자만 지움)."""
     try:
         r = client(provider).chat.completions.create(
-            model=model_name(provider), max_tokens=300, temperature=0.2,
-            messages=[{"role": "system", "content": "다음 한국어 문장에 섞인 한자·중국어·일본어·영어 단어를 뜻이 같은 자연스러운 한국어(한글)로 바꾸세요. "
-                                                    "다른 부분은 그대로 두고, 고친 문장 하나만 출력하세요."},
+            model=model_name(provider), max_tokens=300, temperature=0.2, extra_body=_NO_THINK,
+            messages=[{"role": "system", "content": "다음 한국어 문장에 섞인 한자·중국어·일본어·영어 단어를 뜻이 같은 "
+                                                    "자연스러운 한국어(한글)로 바꾸세요. 다른 부분은 그대로 두고, 고친 문장 하나만 출력하세요."},
                       {"role": "user", "content": text}],
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         fixed = clean(re.sub(r"<think>.*?</think>", "", r.choices[0].message.content or "", flags=re.S))
         if fixed and not has_foreign(fixed):
             return fixed
     except Exception:  # noqa: BLE001
         pass
-    return clean(_LATIN_WORD.sub("", _FOREIGN.sub("", text)))
+    return strip_foreign(text)
 
 
-def make_choice(provider: str, req: dict, raw: list[str]) -> dict:
-    """선택형 동화: 지금까지의 이야기 → 다음 장에서 아이가 고를 질문 1개 + 선택지 2개 (짧은 LLM 호출, 1~2초)."""
-    story = []
-    for line in "".join(raw).split("\n"):
-        ev = _event(line)
-        if ev and ev.get("type") in ("title", "line") and ev.get("text"):
-            story.append(clean(ev["text"]))
-    text = "\n".join(story)[-2500:]
+def make_choice(provider: str, raw: list[str]) -> dict:
+    """선택형 동화: 지금까지의 이야기 → 다음 장에서 아이가 고를 질문 1개 + 선택지 2개 (짧은 호출, 1~2초)."""
     fallback = {"question": "그다음에는 어떻게 될까요?", "options": ["용감하게 앞으로 나아가기", "친구에게 도움을 청하기"]}
     try:
         r = client(provider).chat.completions.create(
-            model=model_name(provider), max_tokens=300, temperature=0.7,
+            model=model_name(provider), max_tokens=300, temperature=0.7, extra_body=_NO_THINK,
             messages=[{"role": "system", "content": (
                 "당신은 아이를 위한 선택형 동화의 연출가입니다. 지금까지의 이야기를 읽고, 다음 장에서 이야기가 갈 방향을 "
                 "아이가 고르도록 묻는 질문 1개와 선택지 2개를 만드세요. 둘 다 재미있고 안전한 길로, 짧고 쉬운 말로. "
                 '한글로만 쓰고, JSON 한 줄만 출력: {"question": "...", "options": ["...", "..."]}')},
-                {"role": "user", "content": text}],
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                {"role": "user", "content": story_text("".join(raw))}],
         )
         out = re.sub(r"<think>.*?</think>", "", r.choices[0].message.content or "", flags=re.S)
         m = re.search(r"\{.*\}", out, re.S)
-        ev = _event(m.group(0).replace("\n", " ")) if m else None
-        if ev is None and m:
-            ev = _loose(m.group(0))
+        ev = parse_loose(m.group(0)) if m else None
         q = clean((ev or {}).get("question"))
         opts = [clean(o) for o in (ev or {}).get("options", []) if clean(o)][:2]
         if q and len(opts) == 2 and not any(has_foreign(x) for x in [q, *opts]):
