@@ -113,12 +113,19 @@ _HTML = """
   };
 
   const setPlay = () => { bPlay.textContent = paused ? "▶ 계속 읽기" : "⏸ 멈춤"; };
+  // 소리가 한 번 끊기면(생성이 재생보다 늦음 — 여러 권을 동시에 만들 때 등) 그 뒤로는
+  // 조각을 몇 개 모아 둔 뒤 이어서 재생 → 문장 중간 잦은 끊김 대신 한 번의 짧은 쉼. 끊김이 없으면 지금처럼 바로 재생.
+  let starved = false;
   const pump = async () => {
     const p = pages()[cur];
-    while (p && !stopped && sched < p.chunks) {
+    if (!p) return;
+    const idle = t <= ctx.currentTime + 0.05;            // 예약된 소리가 다 끝남
+    if (starved && idle && !p.audio_done && p.chunks - sched < 3) return;   // 약 2초분 모일 때까지 대기
+    while (!stopped && sched < p.chunks) {
       const b = await getBuf(cur, sched);
       if (!b) break;
       const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination);
+      if (sched > 0 && t < ctx.currentTime - 0.02) starved = true;   // 다음 조각이 늦게 와서 틈이 생김
       const at = Math.max(t, ctx.currentTime + 0.03);
       s.start(at); starts[sched] = at; t = at + b.duration; srcs.push(s); sched++;
     }

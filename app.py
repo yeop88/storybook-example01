@@ -22,6 +22,7 @@ from micviz import mic_visualizer  # noqa: E402
 from player import book_player  # noqa: E402
 
 gpu.preload()  # STT·그림 모델을 백그라운드로 미리 올림 (서버가 꺼질 때까지 유지)
+book.prewarm_greetings()  # 누르자마자 읽을 인사말을 미리 만들어 둠 (낮은 우선순위)
 
 # 화면 보정: 넓은 화면에서는 오른쪽 재생기를 화면에 고정(sticky), 좁은 화면에서는 자연스럽게 아래로
 st.markdown("""
@@ -110,7 +111,8 @@ def choice_panel(bid: str):
                 st.warning(f"📝 '{heard}' — 잘 못 알아들었어요. 다시 말하거나 버튼을 눌러 주세요.")
 
 
-view = st.radio("화면",["✨ 동화 만들기", "📚 책장"], horizontal=True, label_visibility="collapsed", key="view")
+view = st.radio("화면", ["✨ 동화 만들기", "📚 책장", "📊 통계"], horizontal=True, label_visibility="collapsed",
+                key="view")
 
 # ---------------------------------------------------------------------------
 # ✨ 동화 만들기
@@ -189,9 +191,11 @@ if view == "✨ 동화 만들기":
 
         ready = bool(tts.get("ready")) and bool(config.LLM_PROVIDERS)
         qs = book.queue_status()
-        if qs["making"] or qs["waiting"]:
-            st.caption(f"⏳ 지금 다른 책을 만드는 중이에요 (기다리는 책 {len(qs['waiting'])}권). "
-                       "누르면 순서대로 바로 이어서 만들어요.")
+        if len(qs["making"]) >= qs["limit"]:
+            st.caption(f"⏳ 지금 {len(qs['making'])}권을 만드는 중이에요 (기다리는 책 {len(qs['waiting'])}권). "
+                       "누르면 차례대로 바로 이어서 만들어요.")
+        elif qs["making"]:
+            st.caption(f"📚 지금 다른 책 {len(qs['making'])}권도 함께 만드는 중이에요. 바로 시작할 수 있어요.")
         if st.button("✨ 동화 만들기", type="primary", use_container_width=True, disabled=not (theme.strip() and ready)):
             maker = book.BookMaker({
                 "llm": llm, "theme": theme.strip(), "hero": hero.strip(), "lesson": lesson.strip(), "age": age,
@@ -214,6 +218,14 @@ if view == "✨ 동화 만들기":
                     "AI가 이야기를 쓰고, 그림을 그리고, 목소리로 읽어 줘요. 페이지는 자동으로 넘어가요.")
 
 # ---------------------------------------------------------------------------
+# 📊 통계 (관리자용)
+# ---------------------------------------------------------------------------
+elif view == "📊 통계":
+    import stats
+
+    stats.render()
+
+# ---------------------------------------------------------------------------
 # 📚 책장
 # ---------------------------------------------------------------------------
 else:
@@ -229,6 +241,9 @@ else:
             st.divider()
 
     books = book.list_books()
+    n_books, used = book.books_usage()
+    keep = f" · {config.BOOK_KEEP_DAYS}일 지난 책은 자동 정리" if config.BOOK_KEEP_DAYS > 0 else ""
+    st.caption(f"📚 책 {n_books}권 · 사용 용량 {used / 1e6:,.0f}MB{keep}")
     if not books:
         st.info("아직 만든 책이 없어요. ✨ 동화 만들기에서 첫 책을 만들어 보세요.")
     cols = st.columns(4)

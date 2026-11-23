@@ -21,10 +21,12 @@ def health() -> dict:
         return {"ready": False, "status": f"연결 안 됨 ({type(e).__name__}) — tts_app_streaming 이 실행 중인지 확인하세요"}
 
 
-def stream(text: str, speaker: str = "Sohee", language: str = "Korean", instruct: str = "") -> Iterator[np.ndarray]:
-    """텍스트 → float32 24kHz mono 조각을 생성되는 대로."""
+def stream(text: str, speaker: str = "Sohee", language: str = "Korean", instruct: str = "",
+           priority: float = 0.0) -> Iterator[np.ndarray]:
+    """텍스트 → float32 24kHz mono 조각을 생성되는 대로. priority 가 작을수록 TTS 서버가 먼저 만듦."""
     r = _session.post(f"{config.TTS_API_URL}/tts", timeout=(5, 600), stream=True,
-                      json={"text": text, "speaker": speaker, "language": language, "instruct": instruct})
+                      json={"text": text, "speaker": speaker, "language": language, "instruct": instruct,
+                            "priority": priority})
     if r.status_code != 200:
         raise RuntimeError(f"TTS API 오류 {r.status_code}: {r.text[:200]}")
     rest = b""
@@ -36,6 +38,7 @@ def stream(text: str, speaker: str = "Sohee", language: str = "Korean", instruct
             yield np.frombuffer(data[:cut], dtype="<i2").astype(np.float32) / 32768
 
 
-def synthesize(text: str, speaker: str = "Sohee", language: str = "Korean", instruct: str = "") -> np.ndarray:
-    parts = list(stream(text, speaker, language, instruct))
+def synthesize(text: str, speaker: str = "Sohee", language: str = "Korean", instruct: str = "",
+               priority: float = 0.0) -> np.ndarray:
+    parts = list(stream(text, speaker, language, instruct, priority))
     return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)

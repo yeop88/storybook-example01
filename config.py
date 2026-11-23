@@ -108,6 +108,31 @@ VOICE_TYPES = {
 CHARACTER_VOICE_MODES = {"different": "인물마다 다른 목소리", "same": "해설자 한 명이 연기 (말투·감정만 바꿈)"}
 LINE_PAUSE = 0.35  # 줄 사이 쉼(초)
 
+# 해설자와 겹쳐 다른 목소리를 고를 때의 후보 (같은 성별·나이대 안에서, 앞쪽이 우선)
+VOICE_ALTS = {
+    "girl":        ["Sohee", "Ono_Anna", "Vivian", "Serena"],
+    "boy":         ["Aiden", "Ryan", "Eric", "Dylan"],
+    "young_woman": ["Serena", "Vivian", "Sohee", "Ono_Anna"],
+    "young_man":   ["Ryan", "Aiden", "Eric", "Dylan"],
+    "woman":       ["Vivian", "Serena", "Sohee"],
+    "man":         ["Ryan", "Dylan", "Uncle_Fu", "Eric"],
+    "grandma":     ["Serena", "Vivian", "Sohee"],
+    "grandpa":     ["Uncle_Fu", "Dylan", "Ryan"],
+    "creature":    ["Ono_Anna", "Eric", "Vivian", "Aiden"],
+}
+
+# 누르자마자 읽는 인사말 (서버 시작 시 미리 만들어 둠 → 캐시에서 바로 재생, 그동안 LLM 이 제목을 씀)
+GREETINGS = [
+    "자, 오늘은 어떤 이야기가 펼쳐질까요? 귀를 쫑긋 세우고 들어 보세요.",
+    "안녕, 친구들! 지금부터 아주 특별한 동화를 들려줄게요.",
+    "오늘 밤 함께 읽을 이야기를 지금 막 만들고 있어요. 잠깐만 기다려 줄래요?",
+]
+GREETING_EMOTION = "설레고 다정하게, 아이에게 말을 건네듯 천천히"
+
+# --- 운영 ---------------------------------------------------------------------
+MAX_BOOKS_AT_ONCE = int(env("MAX_BOOKS_AT_ONCE", "2"))  # 동시에 만드는 책 수 (넘으면 대기열)
+BOOK_KEEP_DAYS = int(env("BOOK_KEEP_DAYS", "0"))        # 이 날수보다 오래된 책 자동 삭제 (0 = 지우지 않음)
+
 # --- LLM (내부 네트워크 OpenAI 호환 서버만 사용, think 끔) ---------------------
 LLM_PROVIDERS = {
     name: {

@@ -80,7 +80,7 @@ SYSTEM = f"""당신은 아이들을 위한 그림 동화 작가이자 오디오�
   "신이 나서 웃음을 참지 못하고 통통 튀듯 밝게", "비밀을 말하듯 낮게 속삭이며", "졸려서 하품 섞인 늘어지는 목소리로".
   나쁜 예: "기쁘게", "보통".
 - 해설의 emotion 도 장면 분위기에 맞게 바꾸세요 (긴장감 있게, 설레게, 포근하게 등).
-- 한국어 본문(title, intro, text, 장 제목)에는 한자·중국어·일본어 글자를 절대 쓰지 마세요. 순우리말·한글로만 쓰세요.
+- 한국어 본문(title, intro, text, 장 제목)에는 한자·중국어·일본어 글자나 영어 단어를 절대 쓰지 마세요. 한글로만 쓰세요.
 - text 는 소리 내어 읽습니다. 마크다운·이모지·괄호 설명·따옴표 없이 자연스러운 구어체로, 한 줄은 1~2문장으로 짧게.
 - 시작, 사건, 해결, 따뜻한 마무리가 있어야 합니다. 무섭거나 폭력적인 내용은 넣지 마세요.
 - voice 는 인물의 나이·성별에 맞게 고르세요. 아이 주인공(꼬마 동물 포함)은 girl/boy, 엄마·아빠는 woman/man,
@@ -215,8 +215,12 @@ def continue_story(provider: str, req: dict, raw: list[str], pages_done: int, ch
 _FOREIGN = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
 
 
+_LATIN_WORD = re.compile(r"[A-Za-z]{3,}")
+
+
 def has_foreign(text: str) -> bool:
-    return bool(_FOREIGN.search(text or ""))
+    """한국어 문장에 한자·일본어 글자나 영어 단어(3글자 이상)가 섞였는지."""
+    return bool(_FOREIGN.search(text or "") or _LATIN_WORD.search(text or ""))
 
 
 def fix_foreign(provider: str, text: str) -> str:
@@ -224,7 +228,7 @@ def fix_foreign(provider: str, text: str) -> str:
     try:
         r = client(provider).chat.completions.create(
             model=model_name(provider), max_tokens=300, temperature=0.2,
-            messages=[{"role": "system", "content": "다음 한국어 문장에 섞인 한자·중국어·일본어를 뜻이 같은 자연스러운 한국어(한글)로 바꾸세요. "
+            messages=[{"role": "system", "content": "다음 한국어 문장에 섞인 한자·중국어·일본어·영어 단어를 뜻이 같은 자연스러운 한국어(한글)로 바꾸세요. "
                                                     "다른 부분은 그대로 두고, 고친 문장 하나만 출력하세요."},
                       {"role": "user", "content": text}],
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
@@ -234,7 +238,7 @@ def fix_foreign(provider: str, text: str) -> str:
             return fixed
     except Exception:  # noqa: BLE001
         pass
-    return clean(_FOREIGN.sub("", text))
+    return clean(_LATIN_WORD.sub("", _FOREIGN.sub("", text)))
 
 
 def make_choice(provider: str, req: dict, raw: list[str]) -> dict:
