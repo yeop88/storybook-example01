@@ -3,6 +3,22 @@
 AI 동화 낭독기(`story_app`)의 변경 내용입니다. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따릅니다.
 성능 수치는 RTX 4080 SUPER(16GB), 사내 LLM(FREETOKEN: 사내 MoE 모델) 기준 실측입니다.
 
+## [Unreleased]
+
+### 변경
+- **이야기 LLM 서버**: STRATA 를 없애고 FREETOKEN(사내 OpenAI 호환 서버)과 OPENAI(OpenAI API) 두 가지만 사용.
+  - `.env` 의 `OPENAI_API_KEY` 를 채우면 사용 (`OPENAI_MODEL` 기본 `gpt-4.1-mini`, `OPENAI_BASE_URL` 기본 `https://api.openai.com/v1`).
+  - OpenAI 요청에는 `chat_template_kwargs`(think 끔)를 보내지 않고 `max_completion_tokens` 를 씀. 추론 모델(o*·gpt-5*)은 temperature 생략.
+  - 한쪽 서버가 실패하면 다른 쪽이 이어서 쓰는 동작은 그대로.
+- README 설치·사용법을 자세히: 준비물 표, 단계별 설치(가상환경 확인·모델 목록·.env 필수 키), 화면 구성, 재생기 조작, 문제 해결 표.
+- 선택형이 아닌 동화 요청에 "choice 줄 쓰지 말고 끝까지 쓰기" 한 줄 추가. FREETOKEN 실측: 2장×3쪽에서 LLM 호출 2~3회 → 1회, 이야기 22~26초 → 20~22초, 불필요한 choice 줄 0개.
+
+### 추가
+- `scripts/check_llm.py`: .env 의 이야기 LLM 서버 연결·속도 확인 (모델 없이 바로 돎, 401·연결 실패 원인 안내).
+
+### 제거
+- `STRATA_*` 설정.
+
 ## [0.9.0] - 2026-11-23 — 독립 프로젝트 · 계층형 구조
 
 ### 변경

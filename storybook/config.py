@@ -141,14 +141,20 @@ GREETING_EMOTION = "설레고 다정하게, 아이에게 말을 건네듯 천천
 MAX_BOOKS_AT_ONCE = int(env("MAX_BOOKS_AT_ONCE", "2"))  # 동시에 만드는 책 수 (넘으면 대기열)
 BOOK_KEEP_DAYS = int(env("BOOK_KEEP_DAYS", "0"))        # 이 날수보다 오래된 책 자동 삭제 (0 = 지우지 않음)
 
-# --- LLM (내부 네트워크 OpenAI 호환 서버만 사용, think 끔) ---------------------
-LLM_PROVIDERS = {
-    name: {
-        "base_url": env(f"{name}_BASE_URL"),
-        "api_key": env(f"{name}_API_KEY", "EMPTY"),
-        "model": env(f"{name}_MODEL"),  # 비우면 서버 /models 의 첫 모델
+# --- LLM: FREETOKEN (사내 OpenAI 호환 서버, think 끔) / OPENAI (OpenAI API) -------
+LLM_PROVIDERS = {}
+if env("FREETOKEN_BASE_URL"):
+    LLM_PROVIDERS["FREETOKEN"] = {
+        "base_url": env("FREETOKEN_BASE_URL"),
+        "api_key": env("FREETOKEN_API_KEY", "EMPTY"),
+        "model": env("FREETOKEN_MODEL"),  # 비우면 서버 /models 의 첫 모델
+        "openai": False,
     }
-    for name in ("STRATA", "FREETOKEN")
-    if env(f"{name}_BASE_URL")
-}
+if env("OPENAI_API_KEY"):
+    LLM_PROVIDERS["OPENAI"] = {
+        "base_url": env("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        "api_key": env("OPENAI_API_KEY"),
+        "model": env("OPENAI_MODEL", "gpt-4.1-mini"),
+        "openai": True,
+    }
 LLM_DEFAULT = env("LLM_DEFAULT", next(iter(LLM_PROVIDERS), ""))

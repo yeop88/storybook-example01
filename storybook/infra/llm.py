@@ -1,4 +1,4 @@
-"""사내 LLM 어댑터 (OpenAI 호환 서버만 사용, think 끔).
+"""이야기 LLM 어댑터: FREETOKEN (사내 OpenAI 호환 서버, think 끔) / OPENAI (OpenAI API).
 
 LLM 이 한 줄에 JSON 하나씩(JSON Lines, domain/story_format.py) 쓰게 하고, 줄이 완성되는 즉시 이벤트로 넘깁니다.
 → 이야기를 다 쓰기 전에 제목·첫 문장부터 바로 읽기 시작할 수 있음.
@@ -28,6 +28,18 @@ def client(name: str) -> OpenAI:
 @lru_cache(maxsize=None)
 def model_name(name: str) -> str:
     return config.LLM_PROVIDERS[name]["model"] or client(name).models.list().data[0].id
+
+
+def _opts(name: str, max_tokens: int, temperature: float) -> dict:
+    """서버별 요청 옵션. OpenAI API 는 chat_template_kwargs 를 받지 않고 max_completion_tokens 를 씀
+    (추론 모델 o*·gpt-5* 는 temperature 도 기본값만 허용)."""
+    if not config.LLM_PROVIDERS[name]["openai"]:
+        return {"model": model_name(name), "max_tokens": max_tokens, "temperature": temperature, "extra_body": _NO_THINK}
+    model = model_name(name)
+    opts = {"model": model, "max_completion_tokens": max_tokens}
+    if not re.match(r"(o\d|gpt-5)", model):
+        opts["temperature"] = temperature
+    return opts
 
 
 SYSTEM = f"""당신은 아이들을 위한 그림 동화 작가이자 오디오북 연출가입니다.
@@ -103,6 +115,9 @@ def request_text(req: dict) -> str:
     if req.get("interactive") and c > 1:
         out.append("선택형 동화: 마지막 장을 뺀 각 장의 마지막 page 끝에 choice 줄을 쓰고 바로 멈추세요 (그 뒤는 쓰지 마세요). "
                    "아이가 고른 선택에 따라 다음 장을 이어 쓰게 됩니다. 선택지는 둘 다 재미있고 안전한 길로, 짧고 쉽게.")
+    else:
+        # 없으면 모델이 시스템 프롬프트의 choice 형식을 보고 1쪽 만에 choice 를 쓰고 멈추는 일이 잦음 → 이어 쓰기 호출이 늘어남
+        out.append(f"선택형 동화가 아닙니다: choice 줄은 쓰지 말고, 중간에 멈추지 말고 page no {total} 까지 한 번에 끝까지 쓰세요.")
     if req.get("hero"):
         out.append(f"주인공 이름: {req['hero']}")
     if req.get("lesson"):
@@ -112,8 +127,7 @@ def request_text(req: dict) -> str:
 
 def _stream(provider: str, messages: list[dict], raw: list[str]) -> Iterator[dict]:
     stream = client(provider).chat.completions.create(
-        model=model_name(provider), messages=messages, max_tokens=12000, temperature=0.8, stream=True,
-        extra_body=_NO_THINK,
+        messages=messages, stream=True, **_opts(provider, 12000, 0.8),
     )
     buf = ""
     try:
@@ -167,7 +181,7 @@ def fix_foreign(provider: str, text: str) -> str:
     """한자·중국어·일본어·영어 단어가 섞인 한국어 문장 → 자연스러운 한글 문장 (짧은 호출, 실패하면 그 글자만 지움)."""
     try:
         r = client(provider).chat.completions.create(
-            model=model_name(provider), max_tokens=300, temperature=0.2, extra_body=_NO_THINK,
+            **_opts(provider, 300, 0.2),
             messages=[{"role": "system", "content": "다음 한국어 문장에 섞인 한자·중국어·일본어·영어 단어를 뜻이 같은 "
                                                     "자연스러운 한국어(한글)로 바꾸세요. 다른 부분은 그대로 두고, 고친 문장 하나만 출력하세요."},
                       {"role": "user", "content": text}],
@@ -185,7 +199,7 @@ def make_choice(provider: str, raw: list[str]) -> dict:
     fallback = {"question": "그다음에는 어떻게 될까요?", "options": ["용감하게 앞으로 나아가기", "친구에게 도움을 청하기"]}
     try:
         r = client(provider).chat.completions.create(
-            model=model_name(provider), max_tokens=300, temperature=0.7, extra_body=_NO_THINK,
+            **_opts(provider, 300, 0.7),
             messages=[{"role": "system", "content": (
                 "당신은 아이를 위한 선택형 동화의 연출가입니다. 지금까지의 이야기를 읽고, 다음 장에서 이야기가 갈 방향을 "
                 "아이가 고르도록 묻는 질문 1개와 선택지 2개를 만드세요. 둘 다 재미있고 안전한 길로, 짧고 쉬운 말로. "
