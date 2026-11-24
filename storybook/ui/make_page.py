@@ -64,13 +64,18 @@ def _record_theme():
         st.warning("목소리가 들리지 않았어요. 마이크를 가까이 하고 조금 더 크게 다시 말해 주세요.")
 
 
+def _pick_example():
+    """예시 칩을 누르면 주제 칸에 넣고, 칩 선택은 바로 풀어 둠 (다시 눌러도 동작하게)."""
+    if pick := st.session_state.get("example_pick"):
+        st.session_state.theme = pick
+    st.session_state.example_pick = None
+
+
 def _form() -> dict:
     st.markdown("##### 1. 어떤 이야기를 들려줄까요?")
     _record_theme()
-    with st.expander("💡 예시 주제", expanded=False):
-        for ex in EXAMPLES:
-            st.button(ex, key=f"ex_{ex}", width="stretch",
-                      on_click=lambda e=ex: st.session_state.update(theme=e))
+    with st.expander("💡 예시 주제", expanded=False), st.container(key="examples"):
+        st.pills("예시 주제", EXAMPLES, key="example_pick", label_visibility="collapsed", on_change=_pick_example)
     theme = st.text_area("이야기 주제 (말하거나 직접 입력)", key="theme", height=90,
                          placeholder="예: 바다에 사는 꼬마 문어가 친구를 사귀는 이야기")
 

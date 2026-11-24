@@ -13,7 +13,7 @@ def render():
     if bid := st.session_state.get("shelf_book"):
         b = book_store.read_book(bid)
         if b:
-            top = st.columns([6, 1])
+            top = st.container(key="shelf_top").columns([6, 1])
             top[0].markdown(f"### {b.get('title') or '만드는 중인 책'}")
             if top[1].button("✖ 닫기", width="stretch"):
                 st.session_state.shelf_book = None
@@ -27,7 +27,7 @@ def render():
     st.caption(f"📚 책 {n_books}권 · 사용 용량 {used / 1e6:,.0f}MB{keep}")
     if not books:
         st.info("아직 만든 책이 없어요. ✨ 동화 만들기에서 첫 책을 만들어 보세요.")
-    cols = st.columns(4)
+    cols = st.container(key="shelf_grid").columns(4)
     for i, b in enumerate(books):
         with cols[i % 4], st.container(border=True):
             _card(b)

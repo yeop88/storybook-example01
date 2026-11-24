@@ -10,5 +10,9 @@ maxUploadSize = 50
 sslCertFile = "certs/cert.pem"
 sslKeyFile = "certs/key.pem"
 
+[client]
+# 사내 서비스: 오른쪽 위 Deploy·개발자 메뉴 숨김
+toolbarMode = "minimal"
+
 [browser]
 gatherUsageStats = false

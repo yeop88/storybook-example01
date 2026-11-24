@@ -55,7 +55,7 @@ def render():
     qs = scheduler.status()
     n_books, used = book_store.usage()
     s = startup.status()
-    c = st.columns(4)
+    c = st.container(key="stats_now").columns(4)
     c[0].metric(f"지금 만드는 책 (대기 {len(qs['waiting'])}권)", f"{len(qs['making'])} / {qs['limit']}권")
     c[1].metric(f"저장된 책 ({used / 1e6:,.0f}MB)", f"{n_books}권")
     c[2].metric("목소리(TTS)", "준비" if s["tts_ready"] else s["tts"].split(" (")[0])
@@ -68,7 +68,7 @@ def render():
     df = pd.DataFrame(rows)
     done = df[df["상태"].isin(["✅ 완료", "⚠️ 일부"])]
     st.markdown("##### 품질·속도 (완료된 책 기준)")
-    c = st.columns(5)
+    c = st.container(key="stats_quality").columns(5)
     firsts = _nums(done["첫 소리(초)"])
     c[0].metric(f"완료율 ({len(df)}권 중)", f"{len(df[df['상태'] == '✅ 완료']) / len(df) * 100:.0f}%")
     c[1].metric("첫 소리 (중앙값)", f"{median(firsts):.1f}초" if firsts else "-")

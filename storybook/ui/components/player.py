@@ -20,11 +20,11 @@ _BTN = "padding:6px 14px;border-radius:999px;border:1px solid #d9c6a5;background
 _HTML = """
 <div id="bk-__ID__" style="background:#fffaf0;color:#3b2f2f;border-radius:18px;padding:14px;box-shadow:0 2px 12px rgba(0,0,0,.12);max-width:960px;margin:0 auto;">
   <div id="bk-__ID__-status" style="font-size:.9rem;color:#8a6d4b;min-height:1.3em;margin-bottom:8px;">📖 책을 펼치는 중...</div>
-  <div style="position:relative;width:100%;aspect-ratio:4/3;max-height:50vh;background:#f3e9d8;border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:center;">
+  <div style="position:relative;width:100%;aspect-ratio:4/3;max-height:42vh;background:#f3e9d8;border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:center;">
     <img id="bk-__ID__-img" alt="" style="width:100%;height:100%;object-fit:cover;display:none;transition:opacity .35s ease;">
     <div id="bk-__ID__-ph" style="font-size:1rem;color:#a08360;text-align:center;">🎨<br>그림을 그리는 중...</div>
   </div>
-  <div id="bk-__ID__-lines" style="font-size:1.2rem;line-height:1.65;padding:10px 4px 4px;min-height:5em;max-height:32vh;overflow-y:auto;word-break:keep-all;"></div>
+  <div id="bk-__ID__-lines" style="font-size:1.2rem;line-height:1.65;padding:10px 4px 4px;min-height:5em;max-height:28vh;overflow-y:auto;word-break:keep-all;"></div>
   <div style="display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;padding-top:8px;">
     <button id="bk-__ID__-prev" style="__BTN__">◀ 이전</button>
     <button id="bk-__ID__-play" style="padding:6px 18px;border-radius:999px;border:none;background:#e07a5f;color:#fff;cursor:pointer;font-weight:600;">⏸ 멈춤</button>

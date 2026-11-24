@@ -16,6 +16,9 @@ TTS·받아쓰기·그림 모델은 이 PC의 GPU 에 이 앱이 직접 올리�
 
 접속: **https://<서버-IP>:8502** (마이크 때문에 HTTPS)
 
+> ✅ **테스트 환경: Windows 11 Pro** · NVIDIA RTX 4080 SUPER (16GB) · CUDA 12.8 · Python 3.12 · Chrome 브라우저.
+> 다른 OS(Windows 10, Linux, macOS)에서는 테스트하지 않았습니다. 실행 스크립트(`run.bat`)와 설치 안내는 Windows 기준입니다.
+
 ---
 
 ## 설치 (처음 한 번)
@@ -24,7 +27,7 @@ TTS·받아쓰기·그림 모델은 이 PC의 GPU 에 이 앱이 직접 올리�
 
 | 항목 | 요구 사항 | 확인 방법 |
 |---|---|---|
-| OS | Windows 10 / 11 (64비트) | |
+| OS | **Windows 11** (64비트, 테스트 완료) · Windows 10 은 미검증 | `winver` |
 | GPU | NVIDIA, VRAM 16GB 권장 (RTX 4080 SUPER 에서 실측 최대 13.7GB) | `nvidia-smi` |
 | GPU 드라이버 | CUDA 12.8 을 지원하는 드라이버 (570 이상) | `nvidia-smi` 오른쪽 위 `CUDA Version` 이 12.8 이상 |
 | 디스크 | 여유 공간 약 30GB (모델 약 16GB + 가상환경 약 8GB + 책 저장) | |
@@ -72,7 +75,26 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt --index-str
 | SDXL base + SDXL-Lightning 4단계 UNet + fp16 VAE | 삽화 | `models\sdxl-base`, `sdxl-lightning`, `sdxl-vae-fp16-fix` |
 | IP-Adapter Plus (ViT-H) | 주인공 모습 유지 | `models\ip-adapter` |
 
+- 위 모델은 모두 **공개 모델이라 Hugging Face 로그인 없이** 받아집니다.
 - 이미 받은 파일은 건너뛰므로, 중간에 끊겨도 같은 명령을 다시 실행하면 이어서 받습니다.
+
+**Hugging Face 로그인 (선택)** — 아래 경우에만 하세요.
+- 받다가 `401 Unauthorized`, `429 Too Many Requests`(익명 다운로드 한도)가 나거나, 회사 정책으로 토큰이 필요할 때
+- 접근 승인이 필요한(gated) 모델로 바꿔 쓸 때 (그 모델 페이지에서 먼저 **Agree and access** 를 눌러 승인받아야 함)
+
+1. [huggingface.co](https://huggingface.co/join) 가입 → **Settings → Access Tokens → Create new token** → 종류 **Read** 로 만들고 `hf_...` 토큰 복사
+2. 로그인 (토큰은 `%USERPROFILE%\.cache\huggingface\token` 에 저장되어 다음부터 자동 사용):
+   ```bat
+   .venv\Scripts\hf.exe auth login
+   ```
+   토큰을 붙여 넣고(화면에 보이지 않음) Enter. "Add token as git credential?" 은 `n` 이면 됩니다.
+3. 확인 → 계정 이름이 나오면 성공. 그다음 모델 받기 명령을 다시 실행합니다.
+   ```bat
+   .venv\Scripts\hf.exe auth whoami
+   ```
+- 로그인 없이 이번 한 번만 쓰려면: `set HF_TOKEN=hf_...` 후 같은 창에서 모델 받기 명령 실행
+- 사내망 인증서 오류(`SSLError`, `CERTIFICATE_VERIFY_FAILED`)는 `download_models.py` 가 Windows 인증서 저장소를 쓰도록 이미 처리해 둠. 로그인 명령에서 나면 사내망 밖에서 하거나 IT 담당자에게 문의하세요.
+- 로그아웃: `.venv\Scripts\hf.exe auth logout`
 - 다 받은 뒤에는 인터넷에 접속하지 않습니다 (`.env` 의 `HF_HUB_OFFLINE=1`).
 
 ### 4. 설정 파일 `.env` 만들기
@@ -209,6 +231,7 @@ run.bat
 | 증상 | 원인 · 해결 |
 |---|---|
 | `run.bat` 이 ".venv not found" | 설치 2단계(가상환경)를 먼저 하세요 |
+| 모델 받기가 401 / 429 | 설치 3단계의 Hugging Face 로그인 후 다시 실행 |
 | 사이드바 "이야기 AI 서버" 목록이 비어 있음 / 만들기 버튼이 눌리지 않음 | `.env` 에 `FREETOKEN_BASE_URL` 또는 `OPENAI_API_KEY` 가 없음 → 채우고 서버 다시 켜기 |
 | `check_llm.py` 가 401 Unauthorized | API 키가 틀렸거나 만료됨 → `.env` 의 `*_API_KEY` 확인 (앞뒤 공백·따옴표 없이) |
 | `check_llm.py` 가 연결 실패 | `*_BASE_URL` 의 IP·포트 확인, 사내망(VPN) 접속, LLM 서버가 켜져 있는지 확인 |
@@ -322,7 +345,13 @@ GPU 를 쓰는 다른 프로그램(다른 TTS 앱, Ollama 등)을 함께 켜면 
 
 > `.env` 에는 API 키가 들어 있으므로 공유·커밋하지 마세요 (`.gitignore` 에 포함).
 
-## 라이선스 참고
+## 라이선스
+
+이 저장소의 코드는 [MIT 라이선스](LICENSE)입니다.
+모델은 저장소에 들어 있지 않고 `scripts\download_models.py` 로 따로 받으며, 각 모델의 라이선스를 따릅니다.
+OpenAI API 를 쓰면 OpenAI 이용 약관도 함께 적용됩니다.
+
+### 모델 · 외부 코드 라이선스
 - Qwen3-TTS (모델·코드), Qwen3-TTS-streaming 변형판: Apache 2.0
 - Whisper large-v3-turbo: MIT
 - SDXL base 1.0 / SDXL-Lightning / sdxl-vae-fp16-fix: CreativeML Open RAIL++-M (사용 제한 조항 확인)
